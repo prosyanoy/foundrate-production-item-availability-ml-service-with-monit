@@ -1,0 +1,4 @@
+# Optional: only needed for tests/test_dag.py (skipped when Airflow is not installed).
+# Install with the official constraints file, see the README ("Airflow DAG").
+-r requirements-dev.txt
+apache-airflow==3.0.6

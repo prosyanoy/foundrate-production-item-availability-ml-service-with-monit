@@ -1,0 +1,125 @@
+# Validate locally:  kubeconform -strict deploy/k8s/   (or: kind create cluster && kubectl apply --dry-run=server -f deploy/k8s/)
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: foundrate
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: foundrate-config
+  namespace: foundrate
+data:
+  FOUNDRATE_HOME: /data
+  FOUNDRATE_PSI_THRESHOLD: "0.2"
+  FOUNDRATE_STORE_PSI_THRESHOLD: "0.5"
+---
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: foundrate-state
+  namespace: foundrate
+spec:
+  accessModes: ["ReadWriteOnce"]
+  resources:
+    requests:
+      storage: 1Gi
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: foundrate-api
+  namespace: foundrate
+  labels: {app: foundrate, component: api}
+spec:
+  replicas: 1  # SQLite online store + RWO volume: scale out by moving the online store to Redis (see README)
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: foundrate, component: api}
+  template:
+    metadata:
+      labels: {app: foundrate, component: api}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8000"
+        prometheus.io/path: /metrics
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 1000, fsGroup: 1000}
+      containers:
+        - name: api
+          image: foundrate:latest
+          imagePullPolicy: IfNotPresent
+          ports:
+            - {name: http, containerPort: 8000}
+          envFrom:
+            - configMapRef: {name: foundrate-config}
+          readinessProbe:
+            httpGet: {path: /health, port: http}
+            periodSeconds: 5
+          livenessProbe:
+            httpGet: {path: /health, port: http}
+            initialDelaySeconds: 10
+            periodSeconds: 15
+            failureThreshold: 6
+          resources:
+            requests: {cpu: 100m, memory: 256Mi}
+            limits: {cpu: "1", memory: 512Mi}
+          volumeMounts:
+            - {name: state, mountPath: /data}
+      volumes:
+        - name: state
+          persistentVolumeClaim: {claimName: foundrate-state}
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: foundrate-api
+  namespace: foundrate
+spec:
+  selector: {app: foundrate, component: api}
+  ports:
+    - {name: http, port: 80, targetPort: http}
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: foundrate-monitor
+  namespace: foundrate
+  labels: {app: foundrate, component: monitor}
+spec:
+  replicas: 1
+  strategy: {type: Recreate}
+  selector:
+    matchLabels: {app: foundrate, component: monitor}
+  template:
+    metadata:
+      labels: {app: foundrate, component: monitor}
+      annotations:
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "9100"
+    spec:
+      securityContext: {runAsNonRoot: true, runAsUser: 1000, fsGroup: 1000}
+      # shares the api's ReadWriteOnce volume, so both pods must run on one node
+      affinity:
+        podAffinity:
+          requiredDuringSchedulingIgnoredDuringExecution:
+            - topologyKey: kubernetes.io/hostname
+              labelSelector:
+                matchLabels: {app: foundrate, component: api}
+      containers:
+        - name: monitor
+          image: foundrate:latest
+          imagePullPolicy: IfNotPresent
+          command: ["python", "-m", "foundrate.cli", "monitor", "--serve", "--port", "9100", "--interval", "30"]
+          ports:
+            - {name: metrics, containerPort: 9100}
+          envFrom:
+            - configMapRef: {name: foundrate-config}
+          resources:
+            requests: {cpu: 50m, memory: 192Mi}
+            limits: {cpu: 500m, memory: 512Mi}
+          volumeMounts:
+            - {name: state, mountPath: /data}
+      volumes:
+        - name: state
+          persistentVolumeClaim: {claimName: foundrate-state}

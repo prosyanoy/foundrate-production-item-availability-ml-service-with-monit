@@ -1,0 +1,41 @@
+# Thresholds mirror foundrate/config.py (tests/test_drift.py checks they stay in sync).
+groups:
+  - name: foundrate-model
+    rules:
+      - alert: FoundRateFeatureDrift
+        expr: max(foundrate_feature_psi{feature!="store_rate_7d"}) > 0.2
+        for: 2m
+        labels: {severity: warning}
+        annotations:
+          summary: "A model input feature drifted (PSI > 0.2)"
+          runbook: docs/runbooks/model-drift.md
+      - alert: FoundRateStoreDrift
+        expr: max(foundrate_store_feature_psi) > 0.5
+        for: 2m
+        labels: {severity: page}
+        annotations:
+          summary: "A store's stock pattern changed (per-store PSI > 0.5)"
+          runbook: docs/runbooks/model-drift.md
+      - alert: FoundRateModelAUCDegraded
+        expr: (foundrate_baseline_auc - foundrate_rolling_auc) > 0.05
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "Rolling AUC dropped more than 0.05 below the validation baseline"
+          runbook: docs/runbooks/model-drift.md
+  - name: foundrate-service
+    rules:
+      - alert: FoundRateHighLatency
+        expr: histogram_quantile(0.95, sum by (le) (rate(foundrate_request_latency_seconds_bucket{endpoint="/predict"}[5m]))) > 0.25
+        for: 5m
+        labels: {severity: warning}
+        annotations:
+          summary: "p95 /predict latency above 250ms"
+          runbook: docs/runbooks/model-drift.md#service-health
+      - alert: FoundRateErrorRate
+        expr: sum(rate(foundrate_requests_total{status=~"5.."}[5m])) / sum(rate(foundrate_requests_total[5m])) > 0.01
+        for: 5m
+        labels: {severity: page}
+        annotations:
+          summary: "More than 1% of predictions fail"
+          runbook: docs/runbooks/model-drift.md#service-health

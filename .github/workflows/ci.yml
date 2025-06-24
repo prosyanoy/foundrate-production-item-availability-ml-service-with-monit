@@ -1,0 +1,38 @@
+name: ci
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - run: pip install -r requirements-airflow.txt --constraint https://raw.githubusercontent.com/apache/airflow/constraints-3.0.6/constraints-3.12.txt
+      - run: python -m pytest -q   # includes the Airflow DAG import test
+      - name: Scripted end-to-end scenario (drift -> alert -> runbook -> canary)
+        run: python -m foundrate.cli --home "$RUNNER_TEMP/demo" demo --fast
+
+  manifests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Validate Kubernetes manifests
+        run: |
+          curl -sSL https://github.com/yannh/kubeconform/releases/download/v0.6.7/kubeconform-linux-amd64.tar.gz | tar xz
+          ./kubeconform -strict -summary deploy/k8s/
+      - name: Validate Prometheus rules
+        run: |
+          docker run --rm --entrypoint promtool -v "$PWD/deploy/prometheus:/p:ro" prom/prometheus:v2.54.1 check rules /p/alert_rules.yml
+      - run: docker compose config -q
+
+  image:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker build -t foundrate:ci .

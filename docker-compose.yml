@@ -1,0 +1,61 @@
+# docker compose up --build            -> api, monitor, prometheus, grafana (state in the `state` volume)
+# docker compose run --rm tools bootstrap   (once, trains v1; the api answers 503 until then)
+# docker compose --profile sim up simulator  (live traffic; add SHIFT_STORE=3 to change a store's stock pattern)
+x-app: &app
+  build: .
+  environment: &env
+    FOUNDRATE_HOME: /data
+  volumes:
+    - state:/data
+
+services:
+  api:
+    <<: *app
+    ports: ["8000:8000"]
+
+  monitor:
+    <<: *app
+    command: ["python", "-m", "foundrate.cli", "monitor", "--serve", "--port", "9100", "--interval", "15"]
+    environment:
+      <<: *env
+      FOUNDRATE_MONITOR_MIN_SAMPLES: "${FOUNDRATE_MONITOR_MIN_SAMPLES:-500}"
+
+  tools:  # one-off CLI: bootstrap, refresh, train, canary, remediate
+    <<: *app
+    profiles: ["tools"]
+    entrypoint: ["python", "-m", "foundrate.cli"]
+
+  simulator:
+    <<: *app
+    profiles: ["sim"]
+    entrypoint: ["sh", "-c"]
+    command:
+      - >
+        python -m foundrate.cli traffic --url http://api:8000 -n $${N:-3000}
+        $${SHIFT_STORE:+--shift-store $$SHIFT_STORE --shift-start $${SHIFT_START:-2026-01-22}}
+        $${TRAFFIC_START:+--start $$TRAFFIC_START}
+    depends_on: [api]
+
+  prometheus:
+    image: prom/prometheus:v2.54.1
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/alert_rules.yml:/etc/prometheus/alert_rules.yml:ro
+    ports: ["9090:9090"]
+    depends_on: [api, monitor]
+
+  grafana:
+    image: grafana/grafana:11.2.0
+    environment:
+      GF_SECURITY_ADMIN_USER: "${GRAFANA_USER:-admin}"
+      GF_SECURITY_ADMIN_PASSWORD: "${GRAFANA_PASSWORD:-admin}"
+      GF_AUTH_ANONYMOUS_ENABLED: "true"
+      GF_AUTH_ANONYMOUS_ORG_ROLE: Viewer
+    volumes:
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+      - ./deploy/grafana/dashboards:/var/lib/grafana/dashboards:ro
+    ports: ["3000:3000"]
+    depends_on: [prometheus]
+
+volumes:
+  state:
